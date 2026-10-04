@@ -329,16 +329,23 @@ nav.tabs .badge{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;he
     <div class="panel">
       <h2>เชื่อม Google Sheet</h2>
       <p class="hint">รายการจะถูกส่งไปที่ชีต <code>RawData</code> ข้อมูลบัตรไปที่ <code>CreditCards</code> และการชำระบัตรไปที่ <code>CardPayments</code> ผ่าน Google Apps Script รูปบิลจะถูกเก็บในโฟลเดอร์ <code>Wallet Receipts</code> บน Google Drive พร้อมลิงก์ในชีต</p>
-      <div>
+      <p class="hint" id="gasInfo" hidden>เปิดจากลิงก์ Google Apps Script อยู่ ทุกรายการบันทึกลง Google Sheet ของคุณโดยตรง และโหลดข้อมูลล่าสุดจาก Sheet ทุกครั้งที่เปิดแอป ใช้ได้หลายเครื่อง</p>
+      <button class="btn sm ghost" id="reloadSheet" type="button" hidden>โหลดข้อมูลจาก Sheet ใหม่</button>
+      <div class="urlonly">
         <label class="label" for="sheetUrl">Web App URL (ลงท้าย /exec)</label>
         <input id="sheetUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec">
       </div>
       <div class="row2">
-        <button class="btn sm" id="saveUrl" type="button">บันทึก URL</button>
+        <button class="btn sm urlonly" id="saveUrl" type="button">บันทึก URL</button>
         <button class="btn sm ghost" id="pushPending" type="button">ส่งรายการค้าง</button>
       </div>
+      <div class="row2 urlonly">
+        <button class="btn sm ghost" id="testConn" type="button">ทดสอบการเชื่อมต่อ</button>
+        <button class="btn sm ghost" id="resendAll" type="button">ส่งทุกรายการใหม่</button>
+      </div>
+      <div class="cycle-hint urlonly" id="connResult" hidden></div>
       <p class="hint" id="pendingInfo"></p>
-      <ol class="steps">
+      <ol class="steps urlonly">
         <li>สร้าง Google Sheet ใหม่ → Extensions → Apps Script</li>
         <li>วางโค้ด <code>Code.gs</code> ที่แนบให้ แล้วกด Deploy → New deployment → Web app</li>
         <li>Execute as: Me, Who has access: Anyone → คัดลอก URL มาวางด้านบน</li>
@@ -428,6 +435,15 @@ const MEM=new Map();let dbp=null;
 function db(){if(!dbp)dbp=new Promise((res)=>{try{const r=indexedDB.open('kpm_wallet_photos',1);r.onupgradeneeded=()=>r.result.createObjectStore('photos');r.onsuccess=()=>res(r.result);r.onerror=()=>res(null)}catch(e){res(null)}});return dbp}
 async function idb(mode,fn){const d=await db();if(!d)return null;return new Promise(res=>{try{const tx=d.transaction('photos',mode);const st=tx.objectStore('photos');const r=fn(st);tx.oncomplete=()=>res(r&&r.result);tx.onerror=()=>res(null)}catch(e){res(null)}})}
 async function getPhotos(id){const v=await idb('readonly',s=>s.get(id));return v||MEM.get(id)||[]}
+// local copy first; in Apps Script mode, fetch missing receipts from Drive and cache them
+async function photosFor(t,limit){
+  if(!t)return[];let arr=await getPhotos(t.id);
+  if(arr.length||!(t.photoLinks&&t.photoLinks.length)||typeof GAS==='undefined'||!GAS)return arr;
+  const links=t.photoLinks.slice(0,limit||t.photoLinks.length);const out=[];
+  for(const url of links){try{const data=await run('getPhoto',url);if(data)out.push({data,url,size:Math.round(data.length*3/4),name:'drive.jpg'})}catch(e){}}
+  if(!limit||links.length===t.photoLinks.length)await setPhotos(t.id,out);
+  return out;
+}
 async function setPhotos(id,arr){MEM.set(id,arr);if(!arr.length){await idb('readwrite',s=>s.delete(id));MEM.delete(id);return}await idb('readwrite',s=>s.put(arr,id))}
 async function clearPhotos(ids){for(const id of ids)await setPhotos(id,[])}
 async function photoStats(){const d=await db();let n=0,bytes=0;const add=a=>{(a||[]).forEach(p=>{n++;bytes+=p.size||0})};
@@ -567,7 +583,7 @@ $('ncSave').onclick=()=>{
   const name=$('ncName').value.trim();if(!name){$('ncName').focus();return}
   if(S.cats[curType].some(c=>c.name===name)){toast('มีประเภท “'+name+'” อยู่แล้ว');return}
   const c={id:uid(),name,emoji:$('ncEmoji').value.trim()||'🏷️',custom:true};
-  S.cats[curType].push(c);curCat=c.id;save();
+  S.cats[curType].push(c);curCat=c.id;save();syncCats();
   $('ncName').value='';$('ncEmoji').value='';$('newCat').hidden=true;renderCats();toast('เพิ่มประเภท “'+name+'” แล้ว');
 };
 $('fDate').value=TODAY;
@@ -612,19 +628,23 @@ async function openViewer(id){
   const rows=[['วันที่',thdy(t.date)]];
   if(t.type==='expense')rows.push(['จ่ายด้วย',payInfo(t.pay||'cash').name]);
   if(card){const st=stmtFor(card,t.date);rows.push(['รอบบิล','ตัด '+thdy(st)+' · ชำระ '+thdy(dueFor(card,st))])}
-  rows.push(['โน้ต',t.note||'—'],['สถานะ',t.demo?'ข้อมูลตัวอย่าง':t.synced?'อยู่ใน Google Sheet แล้ว':S.sheetUrl?'รอส่งไป Sheet':'เก็บในเครื่อง']);
+  rows.push(['โน้ต',t.note||'—'],['สถานะ',t.demo?'ข้อมูลตัวอย่าง':t.synced?'อยู่ใน Google Sheet แล้ว':canSync()?'รอส่งไป Sheet':'เก็บในเครื่อง']);
   $('vKv').innerHTML=rows.map(([k,v])=>`<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
   $('viewer').hidden=false;document.body.style.overflow='hidden';
   await renderViewerPhotos();
 }
 async function renderViewerPhotos(){
-  const ph=await getPhotos(viewId);
+  const t0=S.tx.find(x=>x.id===viewId);
+  if(t0&&t0.photoLinks&&t0.photoLinks.length&&!(await getPhotos(viewId)).length)$('vPhotos').innerHTML='<div class="empty">กำลังโหลดรูปจาก Google Drive…</div>';
+  const ph=await photosFor(t0);if(!t0||t0.id!==viewId)return;
   $('vPhotos').innerHTML=ph.length?ph.map((p,i)=>`<div class="vphoto"><img src="${p.data}" alt="รูปบิล ${i+1}"><button class="btn sm ghost" type="button" data-i="${i}">ลบรูป</button></div>`).join('')
     :'<div class="empty">ยังไม่มีรูปบิลสำหรับรายการนี้ กด “+ เพิ่มรูป” เพื่อแนบภายหลังได้</div>';
   $('vPhotos').querySelectorAll('button').forEach(b=>b.onclick=async()=>{
     if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='แตะอีกครั้งเพื่อลบ';return}
-    const arr=await getPhotos(viewId);arr.splice(+b.dataset.i,1);await setPhotos(viewId,arr);
-    const t=S.tx.find(x=>x.id===viewId);t.photos=arr.length;save();toast('ลบรูปออกจากเครื่องแล้ว');renderViewerPhotos();
+    const arr=await getPhotos(viewId);const [gone]=arr.splice(+b.dataset.i,1);await setPhotos(viewId,arr);
+    const t=S.tx.find(x=>x.id===viewId);t.photos=arr.length;
+    if(gone&&gone.url&&t.synced&&canSync()){t.photoLinks=(t.photoLinks||[]).filter(u=>u!==gone.url);post({action:'photoRemove',id:t.id,url:gone.url}).catch(()=>{})}
+    save();toast(gone&&gone.url&&GAS?'ลบรูปแล้ว (ย้ายไปถังขยะใน Drive)':'ลบรูปออกจากเครื่องแล้ว');renderViewerPhotos();
   });
 }
 $('vAdd').addEventListener('change',async e=>{
@@ -632,7 +652,7 @@ $('vAdd').addEventListener('change',async e=>{
   if(room<=0){toast('เพิ่มได้สูงสุด '+MAXP+' รูปต่อรายการ');e.target.value='';return}
   const add=await takeFiles(e.target.files,room);e.target.value='';if(!add.length)return;
   await setPhotos(viewId,cur.concat(add));const t=S.tx.find(x=>x.id===viewId);t.photos=cur.length+add.length;save();
-  if(t.synced&&S.sheetUrl&&!t.demo)post({action:'photos',id:t.id,date:t.date,photos:add.map(photoOut)}).catch(()=>{});
+  if(t.synced&&canSync()&&!t.demo)post({action:'photos',id:t.id,date:t.date,photos:add.map(photoOut)}).then(r=>{if(r&&r.links)attachLinks(t.id,r.links,cur.length)}).catch(()=>{});
   toast('แนบรูปบิลแล้ว '+add.length+' รูป');renderViewerPhotos();
 });
 function closeViewer(){$('viewer').hidden=true;document.body.style.overflow='';viewId=null;if(!$('s-sum').hidden)renderSummary()}
@@ -641,24 +661,33 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('viewer').hidden
 $('fAmount').addEventListener('input',e=>{e.target.value=e.target.value.replace(/[^\d.,]/g,'')});
 
 /* ---------- Google Sheet sync ---------- */
-async function post(obj){await fetch(S.sheetUrl,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(obj)})}
+// GAS = app is served by Google Apps Script itself (open from the script.google.com link)
+const GAS=!!(window.google&&google.script&&google.script.run);
+const canSync=()=>GAS||!!S.sheetUrl;
+const run=(fn,arg)=>new Promise((res,rej)=>google.script.run.withSuccessHandler(res).withFailureHandler(rej)[fn](arg));
+async function post(obj){
+  if(GAS){const r=await run('api',obj);if(!r||!r.ok)throw new Error((r&&r.error)||'บันทึกลง Sheet ไม่สำเร็จ');return r}
+  await fetch(S.sheetUrl,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(obj)});return null;
+}
+async function attachLinks(id,links,offset){const arr=await getPhotos(id);links.forEach((u,i)=>{if(arr[offset+i])arr[offset+i].url=u});await setPhotos(id,arr)}
+function syncCats(){if(!canSync())return;post({action:'cats',cats:['expense','income'].flatMap(t=>S.cats[t].map(c=>({...c,type:t})))}).catch(()=>{})}
 function txPayload(rec,action){
   const c=catById(rec.catId),card=cardById(rec.pay);const st=card?stmtFor(card,rec.date):'';
   return{action,id:rec.id,date:rec.date,type:rec.type==='income'?'รายรับ':'รายจ่าย',category:c.name,amount:rec.amount,note:rec.note||'',
-    payMethod:rec.type==='income'?'':payInfo(rec.pay).name.replace(/ ••\d+$/,''),cardId:card?card.id:'',cardName:card?card.name:'',statementDate:st,dueDate:card?dueFor(card,st):''};
+    payMethod:rec.type==='income'?'':payInfo(rec.pay).name.replace(/ ••\d+$/,''),catId:rec.catId,payId:rec.pay||'',cardId:card?card.id:'',cardName:card?card.name:'',statementDate:st,dueDate:card?dueFor(card,st):''};
 }
 const photoOut=p=>({name:p.name,mime:'image/jpeg',data:p.data.split(',')[1]});
 async function syncTx(rec){
-  if(!S.sheetUrl||rec.demo)return false;
+  if(!canSync()||rec.demo)return false;
   try{const body=txPayload(rec,'add');if(rec.photos)body.photos=(await getPhotos(rec.id)).map(photoOut);
-    await post(body);rec.synced=true;save();updatePill();return true}catch(e){updatePill();return false}
+    const r=await post(body);if(r&&r.links&&r.links.length)await attachLinks(rec.id,r.links,0);rec.synced=true;save();updatePill();return true}catch(e){updatePill();return false}
 }
-async function syncCard(c,action){if(!S.sheetUrl||c.demo)return;try{await post({action:action||'card',...c})}catch(e){}}
-async function syncPayment(card,st,p){if(!S.sheetUrl||card.demo)return;try{await post({action:'payment',cardId:card.id,cardName:card.name,statementDate:st,dueDate:dueFor(card,st),amount:p.amount,paidDate:p.date})}catch(e){}}
+async function syncCard(c,action){if(!canSync()||c.demo)return;try{await post({action:action||'card',...c})}catch(e){}}
+async function syncPayment(card,st,p){if(!canSync()||card.demo)return;try{await post({action:'payment',cardId:card.id,cardName:card.name,statementDate:st,dueDate:dueFor(card,st),amount:p.amount,paidDate:p.date})}catch(e){}}
 function updatePill(){
   const p=$('syncPill');const pend=S.tx.filter(t=>!t.synced&&!t.demo).length;
-  p.className='sync-pill'+(S.sheetUrl?(pend?' pending':' on'):'');
-  p.querySelector('span').textContent=!S.sheetUrl?'ยังไม่เชื่อม Sheet':pend?('ค้างส่ง '+pend):'ซิงก์แล้ว';
+  p.className='sync-pill'+(canSync()?(pend?' pending':' on'):'');
+  p.querySelector('span').textContent=!canSync()?'ยังไม่เชื่อม Sheet':pend?('ค้างส่ง '+pend):'ซิงก์แล้ว';
 }
 
 /* ---------- summary ---------- */
@@ -726,7 +755,7 @@ function renderSummary(){
   const sorted=[...tx].sort((a,b)=>b.date.localeCompare(a.date));let lastD='',h='';
   sorted.forEach(t=>{
     if(t.date!==lastD){lastD=t.date;const d=parse(t.date);h+=`<div class="tx-day">${d.getDate()} ${MS[d.getMonth()]} ${d.getFullYear()+543}</div>`}
-    const c=catById(t.catId);const st=t.demo?'ตัวอย่าง':t.synced?'<span class="dot" style="background:var(--income)"></span>ใน Sheet':S.sheetUrl?'<span class="dot" style="background:var(--warn)"></span>ค้างส่ง':'ในเครื่อง';
+    const c=catById(t.catId);const st=t.demo?'ตัวอย่าง':t.synced?'<span class="dot" style="background:var(--income)"></span>ใน Sheet':canSync()?'<span class="dot" style="background:var(--warn)"></span>ค้างส่ง':'ในเครื่อง';
     let payTxt='';if(t.type==='expense'){const p=payInfo(t.pay||'cash');payTxt=p.color?`<span class="paytag"><i style="background:${p.color}"></i>${esc(p.name)}</span>`:esc(p.icon+' '+p.name)}
     const sub=[payTxt,t.note?esc(t.note):''].filter(Boolean).join(' · ')||'—';
     h+=`<div class="it" data-open="${t.id}" role="button" tabindex="0" aria-label="ดูรายละเอียด ${esc(c.name)} ${baht(t.amount)}"><div class="ic"${t.photos?` data-thumb="${t.id}"`:''}>${esc(c.emoji)}${t.photos?`<span class="pc">${t.photos}</span>`:''}</div><div class="t"><b>${esc(c.name)}</b><small>${sub}</small></div>
@@ -734,12 +763,12 @@ function renderSummary(){
   });
   $('txList').innerHTML=h;
   $('txList').querySelectorAll('[data-open]').forEach(r=>{r.onclick=()=>openViewer(r.dataset.open);r.onkeydown=e=>{if(e.key==='Enter')openViewer(r.dataset.open)}});
-  $('txList').querySelectorAll('[data-thumb]').forEach(async el=>{const ph=await getPhotos(el.dataset.thumb);if(ph[0]){const i=new Image();i.src=ph[0].data;i.alt='';el.prepend(i)}});
+  $('txList').querySelectorAll('[data-thumb]').forEach(async el=>{const ph=await photosFor(S.tx.find(x=>x.id===el.dataset.thumb),1);if(ph[0]){const i=new Image();i.src=ph[0].data;i.alt='';el.prepend(i)}});
   $('txList').querySelectorAll('.del').forEach(b=>b.onclick=e=>{
     e.stopPropagation();const id=b.dataset.id;
     if(armed!==id){armed=id;renderSummary();setTimeout(()=>{if(armed===id){armed=null;renderSummary()}},3000);return}
     const rec=S.tx.find(t=>t.id===id);S.tx=S.tx.filter(t=>t.id!==id);armed=null;save();setPhotos(id,[]);
-    if(rec&&rec.synced&&S.sheetUrl)post({action:'delete',id:rec.id}).catch(()=>{});
+    if(rec&&rec.synced&&canSync())post({action:'delete',id:rec.id}).catch(()=>{});
     toast('ลบรายการแล้ว');renderSummary();updatePill();updateBadge();
   });
 }
@@ -840,23 +869,49 @@ function renderSettings(){
   ['expense','income'].forEach(t=>{
     const el=$(t==='expense'?'setExp':'setInc');
     el.innerHTML=S.cats[t].map(c=>`<span class="chip">${esc(c.emoji)} ${esc(c.name)}${used.has(c.id)?'':`<button data-t="${t}" data-id="${c.id}" aria-label="ลบ ${esc(c.name)}">×</button>`}</span>`).join('');
-    el.querySelectorAll('button').forEach(b=>b.onclick=()=>{S.cats[b.dataset.t]=S.cats[b.dataset.t].filter(c=>c.id!==b.dataset.id);save();renderSettings();renderCats()});
+    el.querySelectorAll('button').forEach(b=>b.onclick=()=>{S.cats[b.dataset.t]=S.cats[b.dataset.t].filter(c=>c.id!==b.dataset.id);save();syncCats();renderSettings();renderCats()});
   });
   const real=S.tx.filter(t=>!t.demo).length,demo=S.tx.length-real,pend=S.tx.filter(t=>!t.synced&&!t.demo).length;
   const base=`มี ${real} รายการของคุณ`+(demo?` และ ${demo} รายการตัวอย่าง (ข้อมูลตัวอย่างไม่ถูกส่งไป Sheet)`:'');
   $('countInfo').textContent=base;
   photoStats().then(s=>{$('countInfo').textContent=base+` · รูปบิล ${s.n} รูป ใช้พื้นที่ ${kb(s.bytes)}`});
-  $('pendingInfo').textContent=S.sheetUrl?(pend?`มี ${pend} รายการที่ยังไม่ได้ส่ง`:'ส่งครบทุกรายการแล้ว'):'ยังไม่ได้ใส่ URL รายการจะเก็บไว้ในเครื่องก่อน และส่งได้ภายหลัง';
+  $('pendingInfo').textContent=canSync()?(pend?`มี ${pend} รายการที่ยังไม่ได้ส่ง`:'ส่งครบทุกรายการแล้ว'):'ยังไม่ได้ใส่ URL รายการจะเก็บไว้ในเครื่องก่อน และส่งได้ภายหลัง';
   $('demoBanner').hidden=!S.tx.some(t=>t.demo)&&!S.cards.some(c=>c.demo);
 }
 $('saveUrl').onclick=()=>{
   const u=$('sheetUrl').value.trim();
   if(u&&!/^https:\/\/script\.google\.com\/.+\/exec$/.test(u)){toast('URL ต้องขึ้นต้นด้วย script.google.com และลงท้าย /exec');return}
   S.sheetUrl=u;save();updatePill();renderSettings();toast(u?'บันทึก URL แล้ว':'ยกเลิกการเชื่อม Sheet');
-  if(u)S.cards.forEach(c=>syncCard(c));
+  if(u){S.cards.forEach(c=>syncCard(c));$('connResult').hidden=false;$('connResult').textContent='กำลังทดสอบการเชื่อมต่อ…';ping().then(showConn)}
+};
+/* connection test for the GitHub version (no-cors POST can't report errors, so ask the script directly) */
+async function ping(){
+  const u=($('sheetUrl').value.trim()||S.sheetUrl||'');
+  if(!u)return{ok:false,msg:'ยังไม่ได้ใส่ Web App URL'};
+  if(!/\/exec$/.test(u))return{ok:false,msg:'URL ต้องลงท้ายด้วย /exec (ไม่ใช่ /dev หรือลิงก์หน้าแก้ไขโค้ด)'};
+  let r,txt;
+  try{r=await fetch(u+'?action=ping&t='+Date.now());txt=await r.text()}
+  catch(e){return{ok:false,msg:'ติดต่อสคริปต์ไม่ได้ มักเกิดจากตั้ง Who has access ไม่ใช่ “Anyone” หรือยังไม่ได้กด Authorize ให้แก้แล้ว Deploy เป็น New version'}}
+  let j;try{j=JSON.parse(txt)}catch(e){
+    if(/ServiceLogin|accounts\.google|Sign in/i.test(txt))return{ok:false,msg:'สคริปต์ขอให้ล็อกอิน: ตั้ง Who has access เป็น “Anyone” (ไม่ใช่ Anyone with Google account หรือ Only myself)'};
+    if(/Index|HTML/i.test(txt)||/<html/i.test(txt))return{ok:false,msg:'สคริปต์เป็นเวอร์ชันเก่า ให้วาง Code.gs ล่าสุด แล้ว Deploy → Manage deployments → ✏️ → New version'};
+    return{ok:false,msg:'สคริปต์ตอบกลับไม่ถูกต้อง ให้วาง Code.gs ล่าสุดแล้ว Deploy เป็น New version'}}
+  if(!j.ok)return{ok:false,msg:/NO_SHEET|getName|null/.test(j.error)?'สคริปต์ไม่ได้ผูกกับ Google Sheet: ต้องสร้างจากเมนู Extensions → Apps Script ภายใน Sheet ไม่ใช่สร้างที่ script.google.com':'สคริปต์มีข้อผิดพลาด: '+j.error+' (ลองกด Run ฟังก์ชัน setup เพื่ออนุญาตสิทธิ์)'};
+  return{ok:true,rows:j.rows,msg:`เชื่อมต่อสำเร็จ ✓ ชีต “${j.sheet}” มี ${j.rows} รายการใน RawData`};
+}
+function showConn(r){const el=$('connResult');el.hidden=false;el.innerHTML=(r.ok?'<b style="color:var(--income)">':'<b style="color:var(--expense)">')+esc(r.msg)+'</b>'}
+$('testConn').onclick=async()=>{$('connResult').hidden=false;$('connResult').textContent='กำลังทดสอบ…';showConn(await ping())};
+$('resendAll').onclick=async()=>{
+  const r0=await ping();if(!r0.ok){showConn(r0);return}
+  const list=S.tx.filter(t=>!t.demo);if(!list.length){toast('ยังไม่มีรายการของคุณ (รายการตัวอย่างไม่ถูกส่ง)');return}
+  $('connResult').hidden=false;$('connResult').textContent=`กำลังส่ง ${list.length} รายการ…`;
+  S.cards.forEach(c=>syncCard(c));syncCats();
+  for(const t of list){t.synced=false;await syncTx(t)}
+  await new Promise(r=>setTimeout(r,2500));const r1=await ping();
+  showConn(r1.ok?{ok:true,msg:`ส่งแล้ว ตอนนี้ RawData มี ${r1.rows} รายการ (ก่อนส่ง ${r0.rows}) รายการที่มีอยู่แล้วจะไม่ถูกเพิ่มซ้ำ`}:r1);renderSettings();
 };
 $('pushPending').onclick=async()=>{
-  if(!S.sheetUrl){toast('ใส่ Web App URL ก่อน');return}
+  if(!canSync()){toast('ใส่ Web App URL ก่อน');return}
   S.cards.forEach(c=>syncCard(c));
   const pend=S.tx.filter(t=>!t.synced&&!t.demo);if(!pend.length){toast('ไม่มีรายการค้างส่ง');return}
   let ok=0;for(const r of pend)if(await syncTx(r))ok++;
@@ -873,7 +928,38 @@ $('wipeAll').onclick=()=>{
 };
 
 setType('expense');renderSettings();updatePill();updateBadge();
-if(!S.demoPhotos&&S.tx.some(t=>t.demo))seedDemoPhotos();
+if(!S.demoPhotos&&S.tx.some(t=>t.demo)&&!GAS)seedDemoPhotos();
+
+/* ---------- Apps Script mode: Sheet is the source of truth ---------- */
+async function loadFromSheet(quiet){
+  if(!GAS)return;
+  try{
+    const st=await run('getState');
+    const has=st.tx.length||st.cards.length;
+    if(st.cats.length){const c={expense:[],income:[]};st.cats.forEach(x=>{if(c[x.type])c[x.type].push({id:x.id,name:x.name,emoji:x.emoji,custom:x.custom})});
+      if(c.expense.length&&c.income.length)S.cats=c}
+    if(has){
+      const local=S.tx.filter(t=>!t.demo&&!t.synced);
+      clearPhotos(S.tx.filter(t=>t.demo).map(t=>t.id));
+      const findCat=(type,name)=>{const l=S.cats[type]||[];return(l.find(c=>c.name===name)||l.find(c=>c.name==='อื่นๆ')||l[0]||{}).id};
+      const known=new Set(st.tx.map(t=>t.id));
+      S.tx=st.tx.map(t=>({id:t.id,date:t.date,type:t.type,amount:t.amount,note:t.note,
+        catId:(S.cats[t.type]||[]).some(c=>c.id===t.catId)?t.catId:findCat(t.type,t.catName),
+        pay:t.type==='income'?null:(t.payId||t.cardId||(t.payMethod==='โอน / QR'?'transfer':'cash')),
+        photos:t.photoLinks.length,photoLinks:t.photoLinks,synced:true})).concat(local.filter(t=>!known.has(t.id)));
+      S.cards=st.cards;S.paid=st.paid;S.demoPhotos=true;
+    }
+    if(!st.cats.length)syncCats();
+    if(!has)S.cards.filter(c=>!c.demo).forEach(c=>syncCard(c));
+    save();
+    for(const t of S.tx.filter(t=>!t.synced&&!t.demo))await syncTx(t);
+    setType(curType);renderSettings();updatePill();updateBadge();
+    if(!$('s-sum').hidden)renderSummary();if(!$('s-card').hidden)renderCards();
+    if(!quiet)toast('โหลดข้อมูลจาก Sheet แล้ว');
+  }catch(e){toast('โหลดข้อมูลจาก Sheet ไม่สำเร็จ ใช้ข้อมูลในเครื่องไปก่อน')}
+}
+if(GAS){document.querySelectorAll('.urlonly').forEach(e=>e.hidden=true);$('gasInfo').hidden=false;$('reloadSheet').hidden=false;
+  $('reloadSheet').onclick=()=>loadFromSheet(false);loadFromSheet(true)}
 })();
 </script>
 </body></html>
