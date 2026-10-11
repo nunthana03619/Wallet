@@ -69,6 +69,7 @@ textarea{resize:vertical;min-height:72px}
 .pay small{display:block;color:var(--muted);font-size:11px}
 .pay.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent)}
 .pay.add{border-style:dashed;color:var(--muted)}
+#ccModes input{accent-color:var(--accent);width:18px;height:18px;flex:none;margin:0}
 .cycle-hint{font-size:13px;background:var(--sunk);border-radius:10px;padding:8px 12px;color:var(--muted)}
 .cycle-hint b{color:var(--ink);font-weight:600}
 
@@ -286,6 +287,7 @@ nav.tabs .badge{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;he
       <h2>รายจ่ายแยกตามช่องทางจ่าย</h2>
       <div id="payMix"></div>
     </div>
+    <div class="cycle-hint" id="carryOut" hidden></div>
     <div class="panel">
       <h2>รายการในเดือนนี้</h2>
       <div class="tx" id="txList"></div>
@@ -357,6 +359,15 @@ nav.tabs .badge{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;he
       <h2>ประเภทรายรับ</h2>
       <div class="cat-list" id="setInc"></div>
       <p class="hint">เพิ่มประเภทใหม่ได้จากหน้าบันทึก (ปุ่ม “+ เพิ่ม”) ลบประเภทได้เมื่อไม่มีรายการใช้งานอยู่</p>
+    </div>
+    <div class="panel">
+      <h2>การนับรายจ่ายบัตรเครดิต</h2>
+      <p class="hint">เลือกว่ารายจ่ายที่รูดบัตร จะนับเข้าสรุปของเดือนไหน</p>
+      <div style="display:flex;flex-direction:column;gap:8px" id="ccModes">
+        <label class="pay" style="width:100%"><input type="radio" name="ccMode" value="statement"> <span>ตามรอบตัดบัตร (แนะนำ)<small>รูดก่อนหรือตรงวันตัดรอบ นับเดือนนั้น · รูดหลังวันตัดรอบ นับเดือนถัดไป</small></span></label>
+        <label class="pay" style="width:100%"><input type="radio" name="ccMode" value="due"> <span>ตามเดือนที่ต้องชำระบิล<small>นับเข้าเดือนที่ครบกำหนดจ่ายเงินจริง</small></span></label>
+        <label class="pay" style="width:100%"><input type="radio" name="ccMode" value="purchase"> <span>ตามวันที่รูดบัตร<small>นับทันทีในเดือนที่ใช้จ่าย เหมือนเงินสด</small></span></label>
+      </div>
     </div>
     <div class="panel">
       <h2>ข้อมูลในเครื่อง</h2>
@@ -517,6 +528,13 @@ let curType='expense',curCat=null,curPay='cash',donutType='expense';
 let fY=today.getFullYear(),fM=today.getMonth();
 const catById=id=>S.cats.expense.concat(S.cats.income).find(c=>c.id===id)||{name:'ไม่ระบุ',emoji:'❔'};
 const cardById=id=>S.cards.find(c=>c.id===id);
+// which month's budget a transaction counts toward (credit cards follow the billing cycle)
+const ccMode=()=>S.ccMode||'statement';
+function budgetMonth(t){
+  const c=t.type==='expense'&&cardById(t.pay);if(!c||ccMode()==='purchase')return t.date.slice(0,7);
+  const st=stmtFor(c,t.date);return(ccMode()==='due'?dueFor(c,st):st).slice(0,7);
+}
+const monthLabel=ym=>{const[y,m]=ym.split('-').map(Number);return MONTHS[m-1]+' '+(y+543)};
 function payInfo(id){const f=PAY_FIXED.find(p=>p.id===id);if(f)return{name:f.name,icon:f.icon};const c=cardById(id);return c?{name:c.name+(c.last4?' ••'+c.last4:''),color:c.color,card:c}:{name:'ไม่ระบุ',icon:'❔'}}
 function colorFor(type,id){const i=S.cats[type].findIndex(c=>c.id===id);return COLORS[(i<0?11:i)%COLORS.length]}
 function toast(msg){document.querySelectorAll('.toast').forEach(t=>t.remove());const t=document.createElement('div');t.className='toast';t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),2400)}
@@ -567,7 +585,9 @@ function updateCycleHint(){
   const c=cardById(curPay);const h=$('cycleHint');
   if(!c||curType!=='expense'||!$('fDate').value){h.hidden=true;return}
   const st=stmtFor(c,$('fDate').value),due=dueFor(c,st);
-  h.hidden=false;h.innerHTML=`รายการนี้เข้ารอบบิลตัดวันที่ <b>${thdy(st)}</b> · ต้องชำระภายใน <b>${thdy(due)}</b>`;
+  const bm=budgetMonth({type:'expense',pay:c.id,date:$('fDate').value}),pm=$('fDate').value.slice(0,7);
+  const shifted=bm!==pm?` · <span style="color:var(--warn)">ผ่านวันตัดรอบแล้ว</span>`:'';
+  h.hidden=false;h.innerHTML=`รายการนี้เข้ารอบบิลตัดวันที่ <b>${thdy(st)}</b> · ต้องชำระภายใน <b>${thdy(due)}</b><br>นับเข้ารายจ่ายเดือน <b>${monthLabel(bm)}</b>${shifted}`;
 }
 $('fDate').addEventListener('change',updateCycleHint);
 function setType(t){
@@ -627,7 +647,7 @@ async function openViewer(id){
   $('vSub').textContent=(t.type==='income'?'รายรับ':'รายจ่าย')+' · '+thdy(t.date);
   const rows=[['วันที่',thdy(t.date)]];
   if(t.type==='expense')rows.push(['จ่ายด้วย',payInfo(t.pay||'cash').name]);
-  if(card){const st=stmtFor(card,t.date);rows.push(['รอบบิล','ตัด '+thdy(st)+' · ชำระ '+thdy(dueFor(card,st))])}
+  if(card){const st=stmtFor(card,t.date);rows.push(['รอบบิล','ตัด '+thdy(st)+' · ชำระ '+thdy(dueFor(card,st))]);rows.push(['นับเข้าเดือน',monthLabel(budgetMonth(t))])}
   rows.push(['โน้ต',t.note||'—'],['สถานะ',t.demo?'ข้อมูลตัวอย่าง':t.synced?'อยู่ใน Google Sheet แล้ว':canSync()?'รอส่งไป Sheet':'เก็บในเครื่อง']);
   $('vKv').innerHTML=rows.map(([k,v])=>`<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
   $('viewer').hidden=false;document.body.style.overflow='hidden';
@@ -674,7 +694,7 @@ function syncCats(){if(!canSync())return;post({action:'cats',cats:['expense','in
 function txPayload(rec,action){
   const c=catById(rec.catId),card=cardById(rec.pay);const st=card?stmtFor(card,rec.date):'';
   return{action,id:rec.id,date:rec.date,type:rec.type==='income'?'รายรับ':'รายจ่าย',category:c.name,amount:rec.amount,note:rec.note||'',
-    payMethod:rec.type==='income'?'':payInfo(rec.pay).name.replace(/ ••\d+$/,''),catId:rec.catId,payId:rec.pay||'',cardId:card?card.id:'',cardName:card?card.name:'',statementDate:st,dueDate:card?dueFor(card,st):''};
+    budgetMonth:budgetMonth(rec),payMethod:rec.type==='income'?'':payInfo(rec.pay).name.replace(/ ••\d+$/,''),catId:rec.catId,payId:rec.pay||'',cardId:card?card.id:'',cardName:card?card.name:'',statementDate:st,dueDate:card?dueFor(card,st):''};
 }
 const photoOut=p=>({name:p.name,mime:'image/jpeg',data:p.data.split(',')[1]});
 async function syncTx(rec){
@@ -692,7 +712,7 @@ function updatePill(){
 
 /* ---------- summary ---------- */
 function fillFilters(){
-  const years=new Set(S.tx.map(t=>+t.date.slice(0,4)));years.add(today.getFullYear());years.add(fY);
+  const years=new Set(S.tx.map(t=>+budgetMonth(t).slice(0,4)));years.add(today.getFullYear());years.add(fY);
   $('selYear').innerHTML=[...years].sort().map(y=>`<option value="${y}"${y===fY?' selected':''}>พ.ศ. ${y+543}</option>`).join('');
   $('selMonth').innerHTML=MONTHS.map((m,i)=>`<option value="${i}"${i===fM?' selected':''}>${m}</option>`).join('');
 }
@@ -702,7 +722,7 @@ $('prevM').onclick=()=>{fM--;if(fM<0){fM=11;fY--}renderSummary()};
 $('nextM').onclick=()=>{fM++;if(fM>11){fM=0;fY++}renderSummary()};
 $('donutSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{donutType=b.dataset.t;$('donutSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));renderSummary()});
 
-function monthTx(){const p=fY+'-'+pad(fM+1);return S.tx.filter(t=>t.date.startsWith(p))}
+function monthTx(){const p=fY+'-'+pad(fM+1);return S.tx.filter(t=>budgetMonth(t)===p)}
 function donutSVG(parts,total,type){
   const R=56,C=2*Math.PI*R;let off=0;
   const segs=parts.map(p=>{const len=p.v/total*C;const s=`<circle r="${R}" cx="75" cy="75" fill="none" stroke="${p.color}" stroke-width="22" stroke-dasharray="${Math.max(len-1.2,0.1)} ${C}" stroke-dashoffset="${-off}" transform="rotate(-90 75 75)"><title>${esc(p.name)} ${baht(p.v)}</title></circle>`;off+=len;return s}).join('');
@@ -746,9 +766,16 @@ function renderSummary(){
     const fixedCol={cash:'#9aa8a3',transfer:'#5d7a72'};
     const parts=Object.entries(g).map(([id,v])=>{const p=payInfo(id);return{v,name:p.name,color:p.color||fixedCol[id]||'#78909c'}}).sort((a,b)=>b.v-a.v);
     const credit=exp.filter(t=>cardById(t.pay)).reduce((a,t)=>a+t.amount,0);
+    const carryIn=exp.filter(t=>t.date.slice(0,7)!==budgetMonth(t)).reduce((a,t)=>a+t.amount,0);
     $('payMix').innerHTML=`<div class="stack">${parts.map(p=>`<span style="width:${p.v/sE*100}%;background:${p.color}" title="${esc(p.name)}"></span>`).join('')}</div>
       <div class="legend" style="margin-top:12px">${parts.map(p=>`<div class="lg"><i style="background:${p.color}"></i><span class="n">${esc(p.name)}</span><span class="a">${baht(p.v)}</span><span class="p">${Math.round(p.v/sE*100)}%</span></div>`).join('')}</div>
-      <p class="hint" style="margin-top:10px">จ่ายผ่านบัตรเครดิตเดือนนี้ ${baht(credit)} (${Math.round(credit/sE*100)}% ของรายจ่าย)</p>`;
+      <p class="hint" style="margin-top:10px">จ่ายผ่านบัตรเครดิตเดือนนี้ ${baht(credit)} (${Math.round(credit/sE*100)}% ของรายจ่าย)${carryIn?` · รวมยอดบัตรที่รูดเดือนก่อนแต่ตัดเข้าเดือนนี้ ${baht(carryIn)}`:''}</p>`;
+  }
+  {const p=fY+'-'+pad(fM+1);const out=S.tx.filter(t=>t.type==='expense'&&t.date.startsWith(p)&&budgetMonth(t)>p);
+    const sum=out.reduce((a,t)=>a+t.amount,0);
+    $('carryOut').hidden=!out.length;
+    if(out.length)$('carryOut').innerHTML=`<b>${baht(sum)}</b> จาก ${out.length} รายการที่รูดบัตรในเดือนนี้หลังวันตัดรอบ จะไปนับในเดือน ${[...new Set(out.map(budgetMonth))].map(monthLabel).join(', ')} <button class="btn sm ghost" id="goNextM" type="button" style="margin-left:6px">ดูเดือนถัดไป</button>`;
+    if(out.length)$('goNextM').onclick=()=>{fM++;if(fM>11){fM=0;fY++}renderSummary();window.scrollTo(0,0)};
   }
   // list
   if(!tx.length){$('txList').innerHTML='<div class="empty">ไม่มีรายการในเดือนนี้ ไปที่แท็บ “บันทึก” เพื่อเพิ่มรายการแรก</div>';return}
@@ -757,7 +784,8 @@ function renderSummary(){
     if(t.date!==lastD){lastD=t.date;const d=parse(t.date);h+=`<div class="tx-day">${d.getDate()} ${MS[d.getMonth()]} ${d.getFullYear()+543}</div>`}
     const c=catById(t.catId);const st=t.demo?'ตัวอย่าง':t.synced?'<span class="dot" style="background:var(--income)"></span>ใน Sheet':canSync()?'<span class="dot" style="background:var(--warn)"></span>ค้างส่ง':'ในเครื่อง';
     let payTxt='';if(t.type==='expense'){const p=payInfo(t.pay||'cash');payTxt=p.color?`<span class="paytag"><i style="background:${p.color}"></i>${esc(p.name)}</span>`:esc(p.icon+' '+p.name)}
-    const sub=[payTxt,t.note?esc(t.note):''].filter(Boolean).join(' · ')||'—';
+    const moved=t.date.slice(0,7)!==budgetMonth(t)?`<span class="tag due">รูด ${thd(t.date)} · ตัดรอบเข้าเดือนนี้</span>`:'';
+    const sub=[moved,payTxt,t.note?esc(t.note):''].filter(Boolean).join(' · ')||'—';
     h+=`<div class="it" data-open="${t.id}" role="button" tabindex="0" aria-label="ดูรายละเอียด ${esc(c.name)} ${baht(t.amount)}"><div class="ic"${t.photos?` data-thumb="${t.id}"`:''}>${esc(c.emoji)}${t.photos?`<span class="pc">${t.photos}</span>`:''}</div><div class="t"><b>${esc(c.name)}</b><small>${sub}</small></div>
     <div class="m ${t.type==='income'?'inc':'exp'}">${t.type==='income'?'+':'−'}${baht(t.amount)}<small>${st} · <button class="del${armed===t.id?' armed':''}" data-id="${t.id}">${armed===t.id?'ยืนยันลบ':'ลบ'}</button></small></div></div>`;
   });
@@ -864,6 +892,7 @@ $('cfDelete').onclick=()=>{
 
 /* ---------- settings ---------- */
 function renderSettings(){
+  document.querySelectorAll('input[name=ccMode]').forEach(r=>{r.checked=r.value===ccMode();r.closest('label').classList.toggle('on',r.checked)});
   $('sheetUrl').value=S.sheetUrl||'';
   const used=new Set(S.tx.map(t=>t.catId));
   ['expense','income'].forEach(t=>{
@@ -917,6 +946,8 @@ $('pushPending').onclick=async()=>{
   let ok=0;for(const r of pend)if(await syncTx(r))ok++;
   renderSettings();toast(ok===pend.length?`ส่ง ${ok} รายการแล้ว`:`ส่งได้ ${ok}/${pend.length} รายการ ตรวจสอบ URL หรืออินเทอร์เน็ต`);
 };
+document.querySelectorAll('input[name=ccMode]').forEach(r=>r.onchange=()=>{S.ccMode=r.value;save();renderSettings();updateCycleHint();
+  toast('นับรายจ่ายบัตรเครดิต'+{statement:'ตามรอบตัดบัตร',due:'ตามเดือนที่ต้องชำระ',purchase:'ตามวันที่รูด'}[r.value]+'แล้ว')});
 function clearDemo(){clearPhotos(S.tx.filter(t=>t.demo).map(t=>t.id));S.tx=S.tx.filter(t=>!t.demo);S.cards=S.cards.filter(c=>!c.demo);for(const k in S.paid)if(S.paid[k].demo)delete S.paid[k];save();renderSettings();renderPays();updateBadge();toast('ล้างข้อมูลตัวอย่างแล้ว')}
 $('clearDemo').onclick=clearDemo;
 $('loadDemo').onclick=async()=>{clearPhotos(S.tx.filter(t=>t.demo).map(t=>t.id));seedDemo();await seedDemoPhotos();renderSettings();renderPays();updateBadge();toast('โหลดข้อมูลตัวอย่างแล้ว')};
